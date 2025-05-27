@@ -31,6 +31,41 @@ client = Groq(api_key=GROQ_API_KEY)
 if ELEVENLABS_API_KEY:
     eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
+def transcribe_with_iitm(audio_file) -> Union[str, None]:
+    """Transcribe audio using IIT Madras ASR API"""
+    try:
+        # Save the uploaded file to a temporary location
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp.write(audio_file.read())
+            tmp_path = tmp.name
+        
+        with open(tmp_path, "rb") as f:
+            files = {
+                'file': f,
+                'language': (None, 'tamil'),  # Default to Tamil, can be made configurable
+                'vtt': (None, 'false')
+            }
+            
+            response = requests.post(
+                'https://asr.iitm.ac.in/internal/asr/decode', 
+                files=files
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            if result.get('status') == 'success':
+                return result.get('transcript', '')
+            else:
+                st.error(f"IITM ASR failed: {result.get('reason', 'Unknown error')}")
+                return None
+                
+    except Exception as e:
+        st.error(f"IIT Madras ASR transcription failed: {str(e)}")
+        return None
+    finally:
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
 def transcribe_with_groq(audio_file) -> Union[str, None]:
     """Transcribe audio using Groq's Whisper model"""
     try:
@@ -58,34 +93,21 @@ def transcribe_with_elevenlabs(audio_file) -> Union[str, None]:
         st.error("ElevenLabs API key not configured")
         return None
 
-    tmp_path = None  # Initialize to avoid reference error
+    tmp_path = None
     try:
-        # Save the uploaded file to a temporary location
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp.write(audio_file.read())
             tmp_path = tmp.name
 
-        # Prepare the API request
         url = "https://api.elevenlabs.io/v1/speech-to-text"
-        headers = {
-            "xi-api-key": ELEVENLABS_API_KEY
-        }
+        headers = {"xi-api-key": ELEVENLABS_API_KEY}
 
-        # Use context manager to ensure the file is closed before deletion
         with open(tmp_path, 'rb') as f:
-            files = {
-                'file': f
-            }
-            data = {
-                # 'model_id': 'scribe_v1'
-                'model_id':'scribe_v1_experimental'
-            }
-
-            # Make the API request
+            files = {'file': f}
+            data = {'model_id': 'scribe_v1_experimental'}
             response = requests.post(url, headers=headers, files=files, data=data)
             response.raise_for_status()
 
-        # Parse the response
         result = response.json()
         return result.get('text', '')
 
@@ -94,14 +116,12 @@ def transcribe_with_elevenlabs(audio_file) -> Union[str, None]:
         if 'response' in locals():
             st.error(f"API Response: {response.text}")
         return None
-
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
             except Exception as cleanup_error:
                 st.warning(f"Could not delete temporary file: {cleanup_error}")
-
 
 def extract_entities_with_llama(text: str) -> Dict:
     """Entity extraction using few-shot structured prompting"""
@@ -170,7 +190,6 @@ def extract_entities_with_llama(text: str) -> Dict:
             temperature=0.1
         )
 
-        # Extract JSON from response
         raw_response = response.choices[0].message.content
         json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
         
@@ -179,7 +198,6 @@ def extract_entities_with_llama(text: str) -> Dict:
         
         entities = json.loads(json_match.group())
         
-        # Validate and clean the response
         return {
             "person_name": entities.get("person_name", []),
             "place": entities.get("place", []),
@@ -214,10 +232,18 @@ with st.expander("ℹ️ How to use"):
 # Model selection
 transcription_model = st.radio(
     "Select Transcription Model",
-    ["Groq (Whisper)", "ElevenLabs"],
+    ["Groq (Whisper)", "ElevenLabs", "IIT Madras ASR"],
     index=0,
     help="Choose which model to use for transcription"
 )
+
+# Language selection (only shown when IIT Madras ASR is selected)
+if transcription_model == "IIT Madras ASR":
+    language = st.selectbox(
+        "Select Language",
+        ["tamil", "english", "hindi", "malayalam", "telugu", "kannada"],
+        index=0
+    )
 
 audio_file = st.file_uploader(
     "Upload audio file", 
@@ -229,8 +255,10 @@ if audio_file and st.button("Process Audio", type="primary"):
     with st.spinner("Transcribing..."):
         if transcription_model == "Groq (Whisper)":
             transcription = transcribe_with_groq(audio_file)
-        else:
+        elif transcription_model == "ElevenLabs":
             transcription = transcribe_with_elevenlabs(audio_file)
+        else:  # IIT Madras ASR
+            transcription = transcribe_with_iitm(audio_file)
     
     if transcription:
         st.subheader("Transcription")
